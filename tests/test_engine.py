@@ -2,7 +2,7 @@
 import threading
 import torch
 from transformers import Qwen3Config, Qwen3ForCausalLM
-from app.engine import Engine, CaptureRequest, summarize_vector, selected_layers
+from app.engine import Engine, CaptureRequest, summarize_vector, selected_layers, channel_groups
 
 class Tokenizer:
     def apply_chat_template(self, messages, **kwargs):
@@ -39,6 +39,19 @@ def test_summary_is_true_rms():
     assert selected_layers(28)==[0,5,11,16,22,27]
 
 
+def test_channel_ranges_match_uneven_tensor_split():
+    vector = torch.arange(35, dtype=torch.float32)
+    result = summarize_vector(vector)
+    assert result['groups'] == channel_groups(35)
+    covered = []
+    for g, measured in zip(result['groups'], result['bins']):
+        channels = list(range(g['channel_start'], g['channel_end_exclusive']))
+        covered.extend(channels)
+        assert abs(measured-vector[channels].square().mean().sqrt().item()) < 1e-6
+    assert covered == list(range(35))
+    assert len(channel_groups(3)) == 3
+
+
 def test_capture_matches_same_forward_and_cached_attention():
     engine = make_engine()
     reference = {}
@@ -54,12 +67,18 @@ def test_capture_matches_same_forward_and_cached_attention():
     assert first['input_position']==2 and first['chosen']['position']==3
     assert first['chosen']['id']==first['top'][0]['id']
     assert first['attention']['keys_total']==3
+    assert first['forward_tokens']==3
+    assert first['processed_positions']=={'start':0,'end_exclusive':3}
+    assert first['attention']['weights']==[x['weight'] for x in sorted(first['attention']['top'],key=lambda x:x['position'])]
     assert abs(sum(x['weight'] for x in first['attention']['top'])-1)<1e-5
     second=next(stream)
     assert second['input_position']==3 and second['attention']['keys_total']==4
     assert second['input_token']['id']==first['chosen']['id']
+    assert second['forward_tokens']==1
+    assert second['processed_positions']=={'start':3,'end_exclusive':4}
     rest=list(stream)
     assert rest[-1]['type']=='done' and rest[-1]['generated_tokens']==3
+    assert abs(rest[-1]['generation_ms']-sum(s['step_ms'] for s in [first,second,rest[0]])) < .01
     handle.remove()
     assert all(not layer._forward_hooks for layer in engine.model.model.layers)
 

@@ -39,7 +39,20 @@ def summarize_vector(vector, groups: int = 16) -> dict:
         "rms": float(vector.square().mean().sqrt().cpu()),
         "bins": bins,
         "hidden_size": vector.numel(),
+        "groups": channel_groups(vector.numel(), len(chunks)),
     }
+
+
+def channel_groups(hidden_size: int, groups: int = 16) -> list[dict]:
+    count = min(groups, hidden_size)
+    size, extra = divmod(hidden_size, count)
+    start = 0
+    result = []
+    for group in range(count):
+        end = start + size + (group < extra)
+        result.append({"group": group, "channel_start": start, "channel_end_exclusive": end})
+        start = end
+    return result
 
 
 class Engine:
@@ -87,6 +100,10 @@ class Engine:
             "heads": config.num_attention_heads,
             "hidden_size": config.hidden_size,
             "bins": min(16, config.hidden_size),
+            "channel_groups": channel_groups(config.hidden_size),
+            "attention_backend": model_backend(self.model),
+            "position_base": 0,
+            "step_base": 0,
             "measurement": "RMS de grupos contíguos na saída de blocos decoder, última posição processada",
         }
 
@@ -114,6 +131,7 @@ class Engine:
             raise ValueError(f"A entrada completa tem {len(context)} tokens. Limite: 256. Encurte a pergunta.")
         yield {"type": "meta", **self.metadata(), "prompt_tokens": len(context),
                "think": req.think, "attention_enabled": req.attention,
+               "temperature": req.temperature, "seed": req.seed,
                "prompt": [self.token_info(i, n) for n, i in enumerate(context)]}
         current = inputs["input_ids"].to(self.device)
         mask = inputs["attention_mask"].to(self.device)
@@ -128,9 +146,13 @@ class Engine:
         end_think = tokenizer.convert_tokens_to_ids("</think>")
         begin_think = tokenizer.convert_tokens_to_ids("<think>")
         finish = "length"
-        inference_start = time.perf_counter()
+        measured_ms = 0.0
+        baseline_vram = None
         if self.device == "cuda":
+            torch.cuda.synchronize()
             torch.cuda.reset_peak_memory_stats()
+            baseline_vram = torch.cuda.memory_allocated() / 1024**2
+        inference_start = time.perf_counter()
 
         def make_hook(layer):
             def capture(module, args, result):
@@ -172,15 +194,21 @@ class Engine:
                             "query_position": len(context) - 1,
                             "query_token": self.token_info(context[-1], len(context)-1),
                             "keys_total": len(context),
+                            "weights": weights.tolist(),
+                            "total_mass": float(weights.sum()),
                             "top": [{**self.token_info(context[p], p), "weight": float(weights[p])}
                                     for p in positions],
-                            "remaining_mass": max(0.0, 1.0 - float(weights[positions].sum())),
+                            "remaining_mass": float(weights.sum() - weights[positions].sum()),
                         }
+                        del matrix, weights
                     output_ids.append(next_id)
                     # A captura é da posição que PREDIZ next_id, não uma ativação de next_id.
                     packet = {
                         "type": "step", "step": step, "phase": phase,
                         "input_position": len(context)-1,
+                        "processed_positions": {"start": 0 if step == 0 else len(context)-1,
+                                                "end_exclusive": len(context)},
+                        "forward_tokens": current.shape[1],
                         "input_token": self.token_info(context[-1], len(context)-1),
                         "chosen": self.token_info(next_id, len(context)),
                         "chosen_probability": float(probs[next_id].cpu()),
@@ -190,8 +218,12 @@ class Engine:
                                  "id": i, "probability": p}
                                 for i, p in zip(top_id.cpu().tolist(), top_p.cpu().tolist())],
                         "text": tokenizer.decode(output_ids, skip_special_tokens=True),
-                        "step_ms": round((time.perf_counter()-tick)*1000, 2),
                     }
+                    if self.device == "cuda":
+                        torch.cuda.synchronize()
+                    step_ms = (time.perf_counter()-tick)*1000
+                    measured_ms += step_ms
+                    packet["step_ms"] = round(step_ms, 3)
                     yield packet
                     if stop.is_set():
                         return
@@ -213,9 +245,18 @@ class Engine:
         yield {"type": "done", "reason": finish, "generated_tokens": len(output_ids),
                "elapsed_ms": round((time.perf_counter()-start)*1000),
                "instrumented_ms": round((time.perf_counter()-inference_start)*1000),
+               "generation_ms": round(measured_ms, 3),
+               "timing_scope": "Soma dos passos sincronizados: forward, hooks, extração e decodificação; exclui carga e espera do consumidor/streaming",
+               "baseline_vram_mib": baseline_vram,
+               "peak_reserved_vram_mib": (round(torch.cuda.max_memory_reserved()/1024**2, 1)
+                                           if self.device == "cuda" else None),
                "peak_vram_mib": (round(torch.cuda.max_memory_allocated()/1024**2, 1)
                                  if self.device == "cuda" else None)}
 
     def token_info(self, token_id: int, position: int):
         return {"id": token_id, "position": position,
                 "token": self.tokenizer.convert_ids_to_tokens(token_id)}
+
+
+def model_backend(model):
+    return model.config._attn_implementation
