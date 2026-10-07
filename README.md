@@ -40,7 +40,7 @@ No `.env`, `LLMLAB_MODEL_ID` pode apontar para outro checkpoint Qwen3 denso, suj
 1. **Ativações:** um hook lê o vetor de saída de cada bloco selecionado, na última posição processada. Cada ponto representa o RMS de um grupo contíguo de canais. Com hidden size 1024, são 16 grupos de 64 canais. A quantidade de canais vem da configuração real.
 2. **Atenção:** as 12 maiores contribuições da última consulta em uma camada/cabeça escolhida antes da geração. A distribuição inclui tokens de sistema e marcadores do chat. As porcentagens vêm da matriz real; o restante aparece separadamente.
 3. **Próximo token:** cinco maiores probabilidades do softmax dos logits brutos, antes da temperatura. O token escolhido pode não ser o primeiro por causa da amostragem.
-4. **Passos:** clique num token ou mova a barra para inspecionar a captura correspondente. Desative acompanhamento ao vivo para ficar num passo enquanto a geração continua. A resposta mostrada acompanha o passo selecionado.
+4. **Passos:** clique num token ou mova a barra para inspecionar a captura correspondente. Desative acompanhamento ao vivo para ficar num passo enquanto a geração continua. O gráfico e os detalhes acompanham o passo selecionado; a resposta completa recebida permanece visível. O painel mantém gráfico 3D, resposta e faixa de tokens juntos, com rolagem interna quando necessária. Atenção, probabilidades, comparação e ajuda ficam em abas. No celular, toque numa aba para abrir seus detalhes e use “Fechar detalhes” para retornar. Tela cheia amplia o laboratório inteiro.
 5. **Inspecionar e comparar:** clique num ponto ou selecione camada/grupo para consultar a faixa exata de canais e o RMS. Escolha uma referência A para comparar com o passo B da barra: RMS por grupo, atenção por posição e probabilidades armazenadas. Valores ausentes não são tratados como zero.
 6. **Exportar:** baixa `captura-llm.json`, no formato `llm-lab-v2`, contendo metadados, faixas de canais, prompt tokenizado, atenção completa da cabeça selecionada e medidas de cada passo. Não importa arquivos para replay nesta versão.
 
@@ -105,3 +105,52 @@ A captura real com Qwen3-0.6B foi validada na GPU. Consulte [GPU_VALIDATION.md](
 - https://pytorch.org/get-started/previous-versions/
 
 A interface foi verificada no Chrome em desktop (1280 px) e celular (390 px), usando a captura real salva pelo diagnóstico GPU: seleção de pontos/canais, passos, comparação A/B, exportação v2 e reinício de captura. Reproduza com `.venv/Scripts/python.exe check_ui.py` (dependência opcional `playwright` e Chrome instalado). O teste de interface reproduz dados salvos; não executa uma nova inferência.
+
+
+## Visualização do processo
+
+Antes da captura, o gráfico mostra um esquema neutro de blocos, sem valores de
+ativação. A estrutura exibida passa a usar as camadas/grupos dos metadados quando
+a entrada é tokenizada. O pulso dourado e a faixa Entrada → Camadas →
+Probabilidades → Token são animações didáticas, não uma medição do tempo ou do
+caminho físico dos sinais. Os pontos dos blocos continuam representando grupos
+de canais; não se transformam em palavras.
+
+As setas contínuas na faixa de tokens representam sua ordem na resposta.
+**Reproduzir** percorre os passos já capturados a cada 1,4 s, sem nova inferência;
+a resposta completa permanece visível. Clique novamente para pausar, ou selecione
+um token. A preferência de movimento reduzido desativa pulsos e transições.
+
+Na aba **Atenção**, **Mostrar ligações medidas** desenha as 12 maiores ligações da
+consulta da posição processada para posições do contexto, incluindo sistema e
+marcadores. A espessura em pixels é `1 + 8 × peso`, sem normalização pelo maior
+peso; valores e posições são rotulados. A posição do token recém-escolhido ainda
+não pertence a esse contexto. Sem captura de atenção, nenhuma ligação é inventada.
+A aba **Como ler** permite consultar todos os tokens reais da entrada.
+
+Verificado no Chrome com a captura GPU salva: estado neutro, reprodução/pausa,
+reinício, posições e espessuras das 12 ligações contra os dados, ausência de
+atenção, movimento reduzido e layout em desktop/celular. A inferência e os
+cálculos numéricos do backend não foram alterados por esta visualização.
+
+
+### Cena principal de tokens e atenção
+
+**Ver tokens** é o modo inicial: contexto, consulta processada em dourado e token
+escolhido em verde aparecem em planos rasos no mesmo espaço 3D. As ligações roxas
+usam os pesos reais da cabeça/camada capturada, com largura `1 + 8 × peso` em pixels
+de tela, sem escala de perspectiva. A seta dourada tracejada representa o cálculo
+e a escolha; não é atenção. Profundidade e posição dos cartões são ilustrativas.
+
+Clique num cartão ou ligação para consultar origem, destino, peso e largura. O
+seletor permite consultar todas as posições por teclado. Por padrão aparecem os
+12 maiores pesos (6 em painéis estreitos); Contexto permite navegar por todas as
+posições em páginas. A consulta sempre permanece visível, incluindo autoatenção.
+O token escolhido não recebe atenção nesse passo; no seguinte, torna-se a consulta.
+As alternativas de saída continuam no painel Próximo token. **Ver camadas** mantém
+os grupos de canais e seus RMS separados desta representação de tokens.
+
+Validação no Chrome usando a captura GPU salva: cada aresta desenhada contra o
+peso e posição reais; espessuras invariantes à rotação; transição escolhido →
+consulta; seleção por cartão/ligação, paginação, ausência de atenção e troca de
+modos. A verificação de layout cobre quatro tamanhos de tela. Backend inalterado.

@@ -27,6 +27,7 @@ def main():
             page.goto(f'http://127.0.0.1:{server.server_port}/static/index.html')
             page.locator('#send').click()
             page.wait_for_function("capture.steps.length===8 && controller===null")
+            page.locator('#viewLayers').click()
             assert page.locator('#comparison tr').count() == 96
             assert page.locator('#compareStep option').count() == 8
             page.locator('#pointLayer').select_option('27')
@@ -34,6 +35,7 @@ def main():
             assert '960–1023' in page.locator('#pointValue').inner_text()
             assert 'camada 27' in page.locator('#pointValue').inner_text()
             # Equal-step comparisons must have zero delta for every group.
+            page.locator('#tab-compare').click()
             page.locator('#compareStep').select_option('7')
             assert page.locator('#comparison tr td:last-child').all_text_contents() == ['0']*96
             page.locator('#compareStep').select_option('0')
@@ -42,6 +44,12 @@ def main():
             assert 'Passo 1' in page.locator('#pointValue').inner_text()
             assert page.locator('#pointLayer').input_value() == '27'
             assert not page.locator('#follow').is_checked()
+            assert page.locator('#answer').inner_text() == next(e['text'] for e in reversed(events) if e['type']=='step')
+            page.locator('#next').click()
+            assert 'Passo 2' in page.locator('#stepLabel').inner_text()
+            page.locator('#pinReference').click()
+            assert page.locator('#compareStep').input_value() == '1'
+            page.locator('#compareStep').select_option('0')
             page.locator('#network').scroll_into_view_if_needed()
             point = page.evaluate('scene.nodes[scene.nodes.length-1]')
             box = page.locator('#network').bounding_box()
@@ -49,6 +57,7 @@ def main():
             assert page.locator('#pointLayer').input_value() == str(point['layer'])
             assert page.locator('#pointGroup').input_value() == str(point['group'])
             page.locator('#steps button').last.click()
+            page.locator('#tab-probability').click()
             page.screenshot(path=str(root/'recordings/ui-desktop.png'), full_page=True)
             with page.expect_download() as download:
                 page.locator('#export').click()
@@ -61,12 +70,46 @@ def main():
             assert page.locator('#compareStep option').count() == 8
             assert page.locator('#compareStep').input_value() == '0'
             assert page.locator('#follow').is_checked()
+            page.locator('#viewTokens').click()
+            # Core panels must fit together without scrolling the page.
+            for width,height in [(1280,720),(1366,768),(1920,1080),(390,844)]:
+                page.set_viewport_size({'width':width, 'height':height})
+                page.wait_for_timeout(150)
+                for selector in ['#network','#answer','#steps']:
+                    bounds=page.locator(selector).bounding_box()
+                    assert bounds and bounds['y'] >= 0 and bounds['y']+bounds['height'] <= height, (width,height,selector,bounds)
+                    assert bounds['height'] >= (90 if selector=='#network' else 25), (width,height,selector,bounds)
+                assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+                assert page.evaluate('document.documentElement.scrollHeight <= innerHeight'), (width,height)
+                active=page.locator('#steps button[aria-pressed=true]').bounding_box()
+                strip=page.locator('#steps').bounding_box()
+                assert active['x']>=strip['x']-1 and active['x']+active['width']<=strip['x']+strip['width']+1
+                page.screenshot(path=str(root/f'recordings/dashboard-{width}.png'))
+            page.locator('#tab-attention').click()
+            assert page.locator('#panel-attention').is_visible()
+            page.locator('#closeDetails').click()
+            assert not page.locator('#panel-attention').is_visible()
             page.set_viewport_size({'width':390, 'height':844})
             page.screenshot(path=str(root/'recordings/ui-mobile.png'), full_page=True)
             assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+            page.set_viewport_size({'width':1280,'height':720})
+            page.locator('#settings summary').click()
+            assert page.locator('#count').is_visible()
+            page.keyboard.press('Escape')
+            assert not page.locator('#count').is_visible()
+            page.locator('#full').click()
+            page.wait_for_function("document.fullscreenElement?.id === 'lab'")
+            assert page.locator('#answer').is_visible() and page.locator('#steps').is_visible()
+            page.locator('#full').click()
+            # Replay the real events in two batches to check browsing during generation.
+            page.evaluate("events=>{capture={meta:null,steps:[],done:null};selected=0;$('compareStep').replaceChildren();$('steps').replaceChildren();$('follow').checked=true;events.forEach(processEvent);}", events[:6])
+            page.locator('#steps button').first.click()
+            page.evaluate('events=>events.forEach(processEvent)', events[6:])
+            assert page.locator('#timeline').input_value()=='0'
+            assert page.locator('#answer').inner_text()==next(e['text'] for e in reversed(events) if e['type']=='step')
             assert not errors, errors
             browser.close()
-            print('PASS: desktop/mobile, point picking, exact groups, A/B, export and reset; real GPU fixture')
+            print('PASS: simultaneous 3D/answer/tokens at 4 viewport sizes; complete answer during replay; point picking, A/B, tabs, export and reset')
     finally:
         server.shutdown()
 
